@@ -3903,9 +3903,9 @@ namespace ts {
 
     /* @internal */
     export const enum StructureIsReused {
-        Not         = 0,
-        SafeModules = 1 << 0,
-        Completely  = 1 << 1,
+        Not,
+        SafeModules,
+        Completely,
     }
 
     export type CustomTransformerFactory = (context: TransformationContext) => CustomTransformer;
