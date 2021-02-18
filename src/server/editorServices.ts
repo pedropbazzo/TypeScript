@@ -1418,18 +1418,13 @@ namespace ts.server {
         private watchExtendedConfigFileForCommandLineCache(canonicalConfigFilePath: NormalizedPath, parsedCommandLine: ParsedCommandLine) {
             updateSharedExtendedConfigFileWatcher(
                 canonicalConfigFilePath,
-                parsedCommandLine,
+                parsedCommandLine.options,
                 this.sharedExtendedConfigFileWatchers,
                 (extendedConfigFileName, extendedConfigFilePath) => this.watchFactory.watchFile(
                     extendedConfigFileName,
                     () => {
                         // Update extended config cache
-                        this.extendedConfigCache.delete(extendedConfigFilePath);
-                        this.extendedConfigCache.forEach(({ extendedResult }, key) => {
-                            if (extendedResult.extendedSourceFiles?.some(extendedFile => this.toPath(extendedFile) === extendedConfigFilePath)) {
-                                this.extendedConfigCache.delete(key);
-                            }
-                        });
+                        cleanExtendsCache(this.extendedConfigCache, extendedConfigFilePath, fileName => this.toPath(fileName));
                         // Update projects
                         let ensureProjectsForOpenFiles = false;
                         this.sharedExtendedConfigFileWatchers.get(extendedConfigFilePath)?.projects.forEach(canonicalPath => {
@@ -1447,10 +1442,7 @@ namespace ts.server {
 
         /*@internal*/
         private stopWatchingExtendedConfigFileForCommandLineCache(canonicalConfigFilePath: NormalizedPath) {
-            this.sharedExtendedConfigFileWatchers.forEach(watcher => {
-                watcher.projects.delete(canonicalConfigFilePath);
-                watcher.close();
-            });
+            clearSharedExtendedConfigFileWatcher(canonicalConfigFilePath, this.sharedExtendedConfigFileWatchers);
         }
 
         private removeProject(project: Project) {
@@ -1689,7 +1681,7 @@ namespace ts.server {
         ) {
             const configFileExistenceInfo = this.configFileExistenceInfoCache.get(canonicalConfigFilePath)!;
             // The existence might not be set if the file watcher is not invoked by the time config project is created by external project
-            configFileExistenceInfo.exists = true;
+            if (canonicalConfigFilePath === forProjectCanonicalPath) configFileExistenceInfo.exists = true;
             if (!configFileExistenceInfo.watcher || configFileExistenceInfo.watcher === noopFileWatcher) {
                 configFileExistenceInfo.watcher = this.watchFactory.watchFile(
                     configFileName,
@@ -1713,14 +1705,14 @@ namespace ts.server {
         }
 
         /* @internal */
-        setConfigFileExistenceInfoByClosedConfiguredProject(closedProject: ConfiguredProject) {
-            const configFileExistenceInfo = this.configFileExistenceInfoCache.get(closedProject.canonicalConfigFilePath)!;
-            configFileExistenceInfo.cachedCommandLine?.projects.delete(closedProject.canonicalConfigFilePath);
+        setConfigFileExistenceInfoByClosedCommandLineCache(canonicalConfigFilePath: NormalizedPath, forProjectCanonicalPath: NormalizedPath) {
+            const configFileExistenceInfo = this.configFileExistenceInfoCache.get(canonicalConfigFilePath)!;
+            configFileExistenceInfo.cachedCommandLine?.projects.delete(forProjectCanonicalPath);
             // If there are still projects watching this config file existence and command line cache, there is nothing to do
             if (configFileExistenceInfo.cachedCommandLine?.projects.size) return;
 
             configFileExistenceInfo.cachedCommandLine = undefined;
-            this.stopWatchingExtendedConfigFileForCommandLineCache(closedProject.canonicalConfigFilePath);
+            this.stopWatchingExtendedConfigFileForCommandLineCache(canonicalConfigFilePath);
             Debug.checkDefined(configFileExistenceInfo.watcher);
             if (configFileExistenceInfo.openFilesImpactedByConfigFile?.size) {
                 // If there are open files that are impacted by this config file existence
@@ -1728,7 +1720,7 @@ namespace ts.server {
                 // created when any of the script infos are added as root of inferred project
                 if (this.configFileExistenceImpactsRootOfInferredProject(configFileExistenceInfo)) {
                     // If we cannot watch config file existence without configured project, close the configured file watcher
-                    if (!canWatchDirectory(getDirectoryPath(closedProject.canonicalConfigFilePath) as Path)) {
+                    if (!canWatchDirectory(getDirectoryPath(canonicalConfigFilePath) as Path)) {
                         configFileExistenceInfo.watcher!.close();
                         configFileExistenceInfo.watcher = noopFileWatcher;
                     }
@@ -1742,7 +1734,7 @@ namespace ts.server {
             else {
                 // There is not a single file open thats tracking the status of this config file. Remove from cache
                 configFileExistenceInfo.watcher!.close();
-                this.configFileExistenceInfoCache.delete(closedProject.canonicalConfigFilePath);
+                this.configFileExistenceInfoCache.delete(canonicalConfigFilePath);
             }
         }
 
@@ -2175,18 +2167,24 @@ namespace ts.server {
                 };
             }
             project.canConfigFileJsonReportNoInputFiles = canJsonReportNoInputFiles(parsedCommandLine.raw);
-            project.setProjectErrors(parsedCommandLine!.options.configFile!.parseDiagnostics);
+            project.setProjectErrors(parsedCommandLine.options.configFile!.parseDiagnostics);
             project.updateReferences(parsedCommandLine.projectReferences);
             const lastFileExceededProgramSize = this.getFilenameForExceededTotalSizeLimitForNonTsFiles(project.canonicalConfigFilePath, compilerOptions, parsedCommandLine.fileNames, fileNamePropertyReader);
             if (lastFileExceededProgramSize) {
                 project.disableLanguageService(lastFileExceededProgramSize);
-                this.stopWatchingWildCards(project, project.canonicalConfigFilePath);
+                this.stopWatchingWildCards(project.canonicalConfigFilePath, project.canonicalConfigFilePath);
+                this.configFileExistenceInfoCache.forEach((value, key) => {
+                    // If watching wild card for this project, stop
+                    if (value.cachedCommandLine?.projects.get(project.canonicalConfigFilePath)) {
+                        this.stopWatchingWildCards(key, project.canonicalConfigFilePath);
+                    }
+                });
             }
             else {
                 project.setCompilerOptions(compilerOptions);
                 project.setWatchOptions(parsedCommandLine.watchOptions);
                 project.enableLanguageService();
-                this.watchWildcards(project, configFilename, cachedCommandLine);
+                this.watchWildcards(configFilename, cachedCommandLine, project.canonicalConfigFilePath);
             }
             project.enablePluginsWithOptions(compilerOptions, this.currentPluginConfigOverrides);
             const filesToAdd = parsedCommandLine.fileNames.concat(project.getExternalFiles());
@@ -2263,23 +2261,11 @@ namespace ts.server {
         }
 
         /*@internal*/
-        getParsedCommandLine(configFileName: NormalizedPath, forProjectCanonicalPath: NormalizedPath) {
-            const canonicalConfigFilePath = asNormalizedPath(this.toCanonicalFileName(configFileName));
-            let configFileExistenceInfo = this.configFileExistenceInfoCache.get(canonicalConfigFilePath);
-            if (!configFileExistenceInfo) {
-                // Create it
-                this.configFileExistenceInfoCache.set(canonicalConfigFilePath, configFileExistenceInfo = { exists: this.host.fileExists(configFileName) });
-            }
-            const result = this.parseTsconfigFile(configFileName, canonicalConfigFilePath, forProjectCanonicalPath);
-            return configFileExistenceInfo.exists ? result.parsedCommandLine : undefined;
-            // TODO: sheetal: what happens in isUptoDate to check for config files?
-        }
-
-        /*@internal*/
-        private watchWildcards(project: ConfiguredProject, configFileName: NormalizedPath, cachedCommandLine: CachedCommandLine) {
-            cachedCommandLine.projects.set(project.canonicalConfigFilePath, true);
+        watchWildcards(configFileName: NormalizedPath, cachedCommandLine: CachedCommandLine, forProjectCanonicalPath: NormalizedPath) {
+            cachedCommandLine.projects.set(forProjectCanonicalPath, true);
             if (cachedCommandLine.watchedDirectories && !cachedCommandLine.watchedDirectoriesStale) return;
 
+            cachedCommandLine.watchedDirectoriesStale = false;
             updateWatchingWildcardDirectories(
                 cachedCommandLine.watchedDirectories ||= new Map(),
                 new Map(getEntries(cachedCommandLine.parsedCommandLine!.wildcardDirectories!)),
@@ -2289,14 +2275,14 @@ namespace ts.server {
         }
 
         /*@internal*/
-        stopWatchingWildCards(project: ConfiguredProject, canonicalConfigFilePath: NormalizedPath) {
+        stopWatchingWildCards(canonicalConfigFilePath: NormalizedPath, forProjectCanonicalPath: NormalizedPath) {
             const configFileExistenceInfo = this.configFileExistenceInfoCache.get(canonicalConfigFilePath)!;
             if (!configFileExistenceInfo.cachedCommandLine ||
-                !configFileExistenceInfo.cachedCommandLine.projects.get(project.canonicalConfigFilePath)) {
+                !configFileExistenceInfo.cachedCommandLine.projects.get(forProjectCanonicalPath)) {
                 return;
             }
 
-            configFileExistenceInfo.cachedCommandLine.projects.set(project.canonicalConfigFilePath, false);
+            configFileExistenceInfo.cachedCommandLine.projects.set(forProjectCanonicalPath, false);
             // If any of the project is still watching wild cards dont close the watcher
             if (forEachEntry(configFileExistenceInfo.cachedCommandLine.projects, identity)) return;
 
@@ -2417,7 +2403,7 @@ namespace ts.server {
                 cachedCommandLine.cachedDirectoryStructureHost,
                 this.hostConfiguration.extraFileExtensions
             );
-            cachedCommandLine.parsedCommandLine!.fileNames = fileNames;
+            cachedCommandLine.parsedCommandLine = { ...cachedCommandLine.parsedCommandLine!, fileNames };
             return fileNames;
         }
 

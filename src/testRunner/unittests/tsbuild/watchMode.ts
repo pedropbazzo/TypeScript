@@ -618,7 +618,7 @@ let x: string = 10;`),
                     const coreIndexDts = projectFileName(SubProject.core, "index.d.ts");
                     const coreAnotherModuleDts = projectFileName(SubProject.core, "anotherModule.d.ts");
                     const logicIndexDts = projectFileName(SubProject.logic, "index.d.ts");
-                    const expectedWatchedDirectoriesRecursive = projectSystem.getTypeRootsFromLocation(projectPath(SubProject.tests));
+                    const expectedWatchedDirectoriesRecursive = projectSystem.getTypeRootsFromLocation(projectPath(SubProject.tests)).concat(projectPath(SubProject.core), projectPath(SubProject.logic));
                     const expectedProjectFiles = () => [libFile, ...tests, ...logic.slice(1), ...core.slice(1, core.length - 1)].map(f => f.path);
                     const expectedProgramFiles = () => [tests[1].path, libFile.path, coreIndexDts, coreAnotherModuleDts, logicIndexDts];
 
@@ -1051,7 +1051,7 @@ export function gfoo() {
                                 // revert the update
                                 revert: host => host.writeFile(bTsconfig.path, bTsconfig.content),
                                 // AfterEdit:: Extra watched files on server since the script infos arent deleted till next file open
-                                orphanInfosAfterEdit: [aTs.path.toLowerCase(), aTsconfig.path.toLowerCase()],
+                                orphanInfosAfterEdit: [aTs.path.toLowerCase()],
                             });
                         });
 
