@@ -31,7 +31,7 @@ namespace ts {
         }
 
         function getJsxFactoryCallee(childrenLength: number) {
-            const type = getJsxFactoryCalleePrimitive(childrenLength);
+            const type = getJsxFactoryCalleePrimitive(childrenLength); 
             return getImplicitImportForName(type);
         }
 
